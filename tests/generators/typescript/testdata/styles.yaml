@@ -1,0 +1,51 @@
+# Every parameter style the runtime serializes; checked by TestRuntimeStyles.
+openapi: 3.1.0
+info: { title: Styles, version: "1" }
+paths:
+  /simple/{v}:
+    get:
+      operationId: path.simple
+      parameters:
+        - { name: v, in: path, required: true, style: simple, explode: false }
+      responses: { "204": { description: ok } }
+  /simpleExplode/{v}:
+    get:
+      operationId: path.simpleExplode
+      parameters:
+        - { name: v, in: path, required: true, style: simple, explode: true }
+      responses: { "204": { description: ok } }
+  /label/{v}:
+    get:
+      operationId: path.label
+      parameters:
+        - { name: v, in: path, required: true, style: label, explode: false }
+      responses: { "204": { description: ok } }
+  /labelExplode/{v}:
+    get:
+      operationId: path.labelExplode
+      parameters:
+        - { name: v, in: path, required: true, style: label, explode: true }
+      responses: { "204": { description: ok } }
+  /matrix/{v}:
+    get:
+      operationId: path.matrix
+      parameters:
+        - { name: v, in: path, required: true, style: matrix, explode: false }
+      responses: { "204": { description: ok } }
+  /matrixExplode/{v}:
+    get:
+      operationId: path.matrixExplode
+      parameters:
+        - { name: v, in: path, required: true, style: matrix, explode: true }
+      responses: { "204": { description: ok } }
+  /query:
+    get:
+      operationId: query.all
+      parameters:
+        - { name: form, in: query }
+        - { name: implode, in: query, explode: false }
+        - { name: space, in: query, style: spaceDelimited, explode: false }
+        - { name: pipe, in: query, style: pipeDelimited, explode: false }
+        - { name: deep, in: query, style: deepObject }
+        - { name: session, in: cookie }
+      responses: { "204": { description: ok } }
