@@ -13,6 +13,7 @@ Built in Go, ships as a single static binary. Generated SDKs have zero runtime d
 | `-lang`      | Output                                                          |
 | ------------ | --------------------------------------------------------------- |
 | `typescript` | `fetch`-based client, works in browsers, Node 18+, Deno and Bun |
+| `go`         | `net/http`-based client package `sdk`, standard library only, Go 1.22+ |
 
 More languages are on the way.
 
@@ -41,6 +42,7 @@ go install github.com/swiftly-headquarters/takumi@latest
 | ------------------------ | ----------------------------------------------------------------------------------------- |
 | `spec`                   | Loads OpenAPI 3.x or Swagger 2.0 (JSON or YAML, file or URL), bundles multi-file specs, resolves `$ref`s, flattens paths into operations, deduces `resource.method` names. |
 | `generators/typescript`  | TypeScript generator. Type mapping in `typescript.go`, the shipped HTTP runtime in `runtime.ts`. |
+| `generators/golang`      | Go generator. Type mapping and methods in `golang.go`, the shipped HTTP runtime in `runtime.go.txt`. |
 | `main.go`                | CLI entry point and the `-lang` → generator registry.                                     |
 
 ## Quick start
@@ -55,7 +57,7 @@ Pick the language explicitly:
 
 ```bash
 ./takumi -input openapi.json -output ./src/api -lang typescript
-./takumi -input https://petstore.swagger.io/v2/swagger.json -output ./sdk
+./takumi -input https://petstore.swagger.io/v2/swagger.json -output ./sdk -lang go
 ```
 
 Specs split over several files work as is: `$ref: schemas/pet.yaml` or `$ref: https://example.com/common.yaml#/components/parameters/Limit` are resolved relative to the file that contains them. Swagger 2.0 documents are converted to OpenAPI 3.0 on load.
@@ -142,6 +144,19 @@ Request bodies are sent as JSON, `multipart/form-data` or `application/x-www-for
 
 - Browsers forbid setting the `Cookie` header, so in a browser cookie parameters are written to `document.cookie` and the request is sent with `credentials: "include"`. The API only receives them when it is on the same site as the page. Node, Deno and Bun send the `Cookie` header directly.
 
+## Go output
+
+`-lang go` writes three files of package `sdk` into the output directory: `types.go` (structs, params and body types), `client.go` (`NewClient`, services, methods) and `runtime.go` (request building, styles, `APIError`). Usage:
+
+```go
+c := sdk.NewClient(sdk.WithBaseURL("https://petstore.example.com/v1"), sdk.WithHeader("Authorization", "Bearer "+token))
+pets, err := c.Pets.List(ctx, sdk.PetsListParams{Limit: &limit}) // ([]Pet, error)
+```
+
+Optional parameters and fields are pointers. Operations take `ctx`, a params struct (omitted when the operation has no parameters or body) and `...RequestOption`. Non-2xx responses return `*APIError`.
+
+The output has no `go.mod`; add your own or copy the files into an existing module.
+
 ## Building from source
 
 Requires **Go 1.27+**.
@@ -152,7 +167,7 @@ cd takumi
 go build -o takumi .
 ```
 
-Run the tests. Set `TAKUMI_TSC=1` to also type-check the generated TypeScript through `npx tsc` and run its runtime under Node, checking every parameter style:
+Run the tests. The Go tests build the generated SDK in a temp module and run its runtime against `httptest`. Set `TAKUMI_TSC=1` to also type-check the generated TypeScript through `npx tsc` and run its runtime under Node, checking every parameter style:
 
 ```bash
 go test ./...
@@ -177,12 +192,17 @@ takumi/
 │   ├── swagger.go               # Swagger 2.0 -> OpenAPI 3.0 conversion
 │   └── plan.go                  # Plan(): deduces resource.method names from paths and operationIds
 ├── generators/
+│   ├── golang/
+│   │   ├── golang.go           # Schema -> Go types, operations -> Client methods
+│   │   └── runtime.go.txt      # Embedded net/http runtime (request, APIError, styles)
 │   └── typescript/
 │       ├── typescript.go        # Schema -> TS types, operations -> Client methods
 │       └── runtime.ts           # Embedded fetch runtime (BaseClient, ApiError)
 ├── tests/
 │   ├── spec/                    # Plan(), loading, bundling and Swagger 2.0 tests
 │   └── generators/
+│       ├── golang/
+│       │   └── golang_test.go
 │       └── typescript/
 │           ├── typescript_test.go
 │           └── testdata/        # Fixture specs

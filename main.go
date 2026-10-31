@@ -8,11 +8,13 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/swiftly-headquarters/takumi/generators/golang"
 	"github.com/swiftly-headquarters/takumi/generators/typescript"
 	"github.com/swiftly-headquarters/takumi/spec"
 )
 
 var generators = map[string]func(*spec.Document) (map[string][]byte, error){
+	"go":         golang.Generate,
 	"typescript": typescript.Generate,
 }
 

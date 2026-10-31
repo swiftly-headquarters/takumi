@@ -1,0 +1,446 @@
+package sdk
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// APIError is returned for every non-2xx response. Body is the parsed JSON, or the raw text.
+type APIError struct {
+	Status   int
+	Body     any
+	Response *http.Response
+}
+
+func (e *APIError) Error() string { return "HTTP " + e.Response.Status }
+
+// ClientOption configures a Client.
+type ClientOption func(*base)
+
+// RequestOption adjusts a single request before it is sent, e.g. to add a header.
+type RequestOption func(*http.Request)
+
+// WithBaseURL overrides the first `servers` entry of the spec.
+func WithBaseURL(u string) ClientOption { return func(b *base) { b.baseURL = u } }
+
+// WithHTTPClient sets the http.Client used for every request.
+func WithHTTPClient(h *http.Client) ClientOption { return func(b *base) { b.http = h } }
+
+// WithHeader sends a header with every request.
+func WithHeader(key, value string) ClientOption {
+	return WithHeaders(func(context.Context) (http.Header, error) {
+		return http.Header{key: {value}}, nil
+	})
+}
+
+// WithHeaders sends the returned headers with every request. Use it for tokens that change.
+func WithHeaders(f func(context.Context) (http.Header, error)) ClientOption {
+	return func(b *base) { b.headers = append(b.headers, f) }
+}
+
+// WithRequestHeader sets a header on one request.
+func WithRequestHeader(key, value string) RequestOption {
+	return func(r *http.Request) { r.Header.Set(key, value) }
+}
+
+type base struct {
+	baseURL string
+	http    *http.Client
+	headers []func(context.Context) (http.Header, error)
+}
+
+func newBase(baseURL string, opts []ClientOption) base {
+	b := base{baseURL: baseURL, http: http.DefaultClient}
+	for _, o := range opts {
+		o(&b)
+	}
+	return b
+}
+
+type param struct {
+	in, name, style string
+	value           any
+}
+
+type request struct {
+	method, path             string
+	params                   []param
+	body                     any
+	bodyKind, contentType    string
+	parse                    string
+}
+
+func (b *base) do(ctx context.Context, r request, out any, opts []RequestOption) error {
+	u := strings.TrimRight(b.baseURL, "/") + expandPath(r.path, r.params)
+	var query []string
+	for _, p := range pairs("query", r.params) {
+		query = append(query, escape(p.k)+"="+escape(p.v))
+	}
+	if len(query) > 0 {
+		u += "?" + strings.Join(query, "&")
+	}
+
+	body, contentType, err := encodeBody(r)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, r.method, u, body)
+	if err != nil {
+		return err
+	}
+	for _, f := range b.headers {
+		h, err := f(ctx)
+		if err != nil {
+			return err
+		}
+		for k, vs := range h {
+			req.Header[http.CanonicalHeaderKey(k)] = vs
+		}
+	}
+	for _, p := range r.params {
+		if v := norm(p.value); p.in == "header" && v != nil {
+			req.Header.Set(p.name, scalar(v))
+		}
+	}
+	var cookies []string
+	for _, p := range pairs("cookie", r.params) {
+		cookies = append(cookies, p.k+"="+escape(p.v))
+	}
+	if len(cookies) > 0 {
+		if old := req.Header.Get("Cookie"); old != "" {
+			cookies = append([]string{old}, cookies...)
+		}
+		req.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for _, o := range opts {
+		o(req)
+	}
+
+	res, err := b.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		var parsed any
+		if json.Unmarshal(data, &parsed) != nil {
+			parsed = string(data)
+		}
+		return &APIError{Status: res.StatusCode, Body: parsed, Response: res}
+	}
+	if out == nil || res.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	switch r.parse {
+	case "text":
+		*out.(*string) = string(data)
+	case "blob":
+		*out.(*[]byte) = data
+	default:
+		if len(bytes.TrimSpace(data)) > 0 {
+			return json.Unmarshal(data, out)
+		}
+	}
+	return nil
+}
+
+func encodeBody(r request) (io.Reader, string, error) {
+	if reader, ok := r.body.(io.Reader); ok && reader != nil {
+		return reader, r.contentType, nil
+	}
+	body := indirect(r.body)
+	if body == nil {
+		return nil, "", nil
+	}
+	switch r.bodyKind {
+	case "json":
+		data, err := json.Marshal(body)
+		return bytes.NewReader(data), r.contentType, err
+	case "form":
+		values := url.Values{}
+		for _, f := range formFields(body) {
+			values.Set(f.name, scalar(norm(f.value)))
+		}
+		return strings.NewReader(values.Encode()), r.contentType, nil
+	case "multipart":
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		for _, f := range formFields(body) {
+			var err error
+			switch v := f.value.(type) {
+			case []byte:
+				var part io.Writer
+				if part, err = w.CreateFormFile(f.name, f.name); err == nil {
+					_, err = part.Write(v)
+				}
+			case io.Reader:
+				var part io.Writer
+				if part, err = w.CreateFormFile(f.name, f.name); err == nil {
+					_, err = io.Copy(part, v)
+				}
+			default:
+				err = w.WriteField(f.name, scalar(norm(v)))
+			}
+			if err != nil {
+				return nil, "", err
+			}
+		}
+		return &buf, w.FormDataContentType(), w.Close()
+	}
+	switch v := body.(type) {
+	case string:
+		return strings.NewReader(v), r.contentType, nil
+	case []byte:
+		return bytes.NewReader(v), r.contentType, nil
+	}
+	return nil, "", nil
+}
+
+type formField struct {
+	name  string
+	value any
+}
+
+func formFields(body any) []formField {
+	v := reflect.ValueOf(body)
+	var out []formField
+	switch v.Kind() {
+	case reflect.Map:
+		keys := v.MapKeys()
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		for _, k := range keys {
+			out = append(out, formField{k.String(), v.MapIndex(k).Interface()})
+		}
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			f, fv := v.Type().Field(i), v.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			switch {
+			case !f.IsExported() || name == "-":
+				continue
+			case name == "":
+				name = f.Name
+			}
+			switch fv.Kind() {
+			case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice:
+				if fv.IsNil() {
+					continue
+				}
+			}
+			out = append(out, formField{name, fv.Interface()})
+		}
+	}
+	return out
+}
+
+func indirect(v any) any {
+	rv := reflect.ValueOf(v)
+	for rv.IsValid() && rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return nil
+	}
+	return rv.Interface()
+}
+
+func norm(v any) any {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var out any
+	if dec.Decode(&out) != nil {
+		return nil
+	}
+	return out
+}
+
+func scalar(v any) string {
+	switch v := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	case bool:
+		return strconv.FormatBool(v)
+	}
+	data, _ := json.Marshal(v)
+	return string(data)
+}
+
+func escape(s string) string { return strings.ReplaceAll(url.QueryEscape(s), "+", "%20") }
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k, v := range m {
+		if v != nil {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type pair struct{ k, v string }
+
+var separators = map[string]string{"form:implode": ",", "spaceDelimited": " ", "pipeDelimited": "|"}
+
+func pairs(in string, params []param) []pair {
+	var out []pair
+	for _, p := range params {
+		value := norm(p.value)
+		if p.in != in || value == nil {
+			continue
+		}
+		sep := separators[p.style]
+		switch v := value.(type) {
+		case []any:
+			var items []string
+			for _, e := range v {
+				if e != nil {
+					items = append(items, scalar(e))
+				}
+			}
+			if sep != "" {
+				out = append(out, pair{p.name, strings.Join(items, sep)})
+				continue
+			}
+			for _, e := range items {
+				out = append(out, pair{p.name, e})
+			}
+		case map[string]any:
+			if p.style == "deepObject" {
+				out = append(out, deepPairs(p.name, v)...)
+				continue
+			}
+			var flat []string
+			for _, k := range sortedKeys(v) {
+				flat = append(flat, k, scalar(v[k]))
+				if sep == "" {
+					out = append(out, pair{k, scalar(v[k])})
+				}
+			}
+			if sep != "" {
+				out = append(out, pair{p.name, strings.Join(flat, sep)})
+			}
+		default:
+			out = append(out, pair{p.name, scalar(v)})
+		}
+	}
+	return out
+}
+
+func deepPairs(name string, v any) []pair {
+	switch v := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		items := make([]string, len(v))
+		for i, e := range v {
+			items[i] = scalar(e)
+		}
+		return []pair{{name, strings.Join(items, ",")}}
+	case map[string]any:
+		var out []pair
+		for _, k := range sortedKeys(v) {
+			out = append(out, deepPairs(name+"["+k+"]", v[k])...)
+		}
+		return out
+	}
+	return []pair{{name, scalar(v)}}
+}
+
+var pathRe = regexp.MustCompile(`\{([^}]+)\}`)
+
+func expandPath(path string, params []param) string {
+	return pathRe.ReplaceAllStringFunc(path, func(m string) string {
+		name := m[1 : len(m)-1]
+		for _, p := range params {
+			if p.in == "path" && p.name == name {
+				return pathValue(name, norm(p.value), p.style)
+			}
+		}
+		return ""
+	})
+}
+
+func pathValue(name string, value any, style string) string {
+	kind, _, explode := strings.Cut(style, ":")
+	if kind == "" {
+		kind = "simple"
+	}
+	var items [][]string
+	_, isObject := value.(map[string]any)
+	switch v := value.(type) {
+	case []any:
+		for _, e := range v {
+			items = append(items, []string{escape(scalar(e))})
+		}
+	case map[string]any:
+		for _, k := range sortedKeys(v) {
+			items = append(items, []string{escape(k), escape(scalar(v[k]))})
+		}
+	default:
+		items = [][]string{{escape(scalar(v))}}
+	}
+
+	if kind == "matrix" {
+		var out strings.Builder
+		if !explode {
+			var flat []string
+			for _, i := range items {
+				flat = append(flat, i...)
+			}
+			return ";" + name + "=" + strings.Join(flat, ",")
+		}
+		for _, i := range items {
+			if isObject {
+				out.WriteString(";" + i[0] + "=" + i[1])
+			} else {
+				out.WriteString(";" + name + "=" + i[0])
+			}
+		}
+		return out.String()
+	}
+	prefix := ""
+	if kind == "label" {
+		prefix = "."
+	}
+	itemSep, joiner := ",", ","
+	if explode {
+		itemSep = "="
+		if prefix != "" {
+			joiner = prefix
+		}
+	}
+	parts := make([]string, len(items))
+	for i, item := range items {
+		parts[i] = strings.Join(item, itemSep)
+	}
+	return prefix + strings.Join(parts, joiner)
+}

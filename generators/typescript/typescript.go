@@ -363,8 +363,8 @@ func (g *gen) paramFields(op spec.Op) (fields []string, required bool) {
 
 // bodyField renders the `body` entry and returns the runtime body kind and content type.
 func (g *gen) bodyField(rb *spec.RequestBody) (field, kind, contentType string) {
-	contentType, mt := pick(rb.Content)
-	kind = kindOf(contentType)
+	contentType, mt := spec.PickMedia(rb.Content)
+	kind = spec.MediaKind(contentType)
 	bodyType := g.typ(mt.Schema)
 	switch {
 	case kind == "raw" && strings.HasPrefix(contentType, "text/"):
@@ -401,11 +401,11 @@ func (g *gen) response(op spec.Op) (string, string) {
 		if !strings.HasPrefix(code, "2") {
 			continue
 		}
-		ct, mt := pick(op.Responses[code].Content)
+		ct, mt := spec.PickMedia(op.Responses[code].Content)
 		switch {
 		case mt == nil || code == "204":
 			return "void", "void"
-		case kindOf(ct) == "json":
+		case spec.MediaKind(ct) == "json":
 			return g.typ(mt.Schema), "json"
 		case strings.HasPrefix(ct, "text/"):
 			return "string", "text"
@@ -414,35 +414,6 @@ func (g *gen) response(op spec.Op) (string, string) {
 		}
 	}
 	return "unknown", "json"
-}
-
-// pick chooses the preferred media type: JSON first, then forms, then whatever is first.
-func pick(content map[string]*spec.MediaType) (string, *spec.MediaType) {
-	keys := spec.SortedKeys(content)
-	if len(keys) == 0 {
-		return "", nil
-	}
-	for _, want := range []string{"json", "multipart", "form"} {
-		for _, k := range keys {
-			if kindOf(k) == want {
-				return k, content[k]
-			}
-		}
-	}
-	return keys[0], content[keys[0]]
-}
-
-func kindOf(contentType string) string {
-	ct, _, _ := strings.Cut(contentType, ";")
-	switch {
-	case ct == "application/json" || strings.HasSuffix(ct, "+json"):
-		return "json"
-	case ct == "multipart/form-data":
-		return "multipart"
-	case ct == "application/x-www-form-urlencoded":
-		return "form"
-	}
-	return "raw"
 }
 
 func doc(text string, deprecated bool, indent string) string {
