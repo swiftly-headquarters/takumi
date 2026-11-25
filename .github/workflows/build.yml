@@ -44,6 +44,18 @@ jobs:
           go vet ./...
           TAKUMI_TSC=1 go test ./...
 
+      - name: gRPC SDK smoke test
+        run: |
+          go build -o takumi .
+          dir="$RUNNER_TEMP/grpc-sdk"
+          ./takumi -input tests/generators/typescript/testdata/shop.proto -output "$dir/go" -lang go
+          ./takumi -input tests/generators/typescript/testdata/shop.proto -output "$dir/ts" -lang typescript
+          # Build the generated Go package against this module's dependency versions.
+          cp go.mod go.sum "$dir/go/"
+          sed -i 's|^module .*|module sdksmoke|' "$dir/go/go.mod"
+          (cd "$dir/go" && go vet ./...)
+          npx -y -p typescript tsc --noEmit --strict --target es2022 --module nodenext --lib es2022,dom "$dir/ts/index.ts"
+
       - name: Build and package
         run: |
           mkdir -p release

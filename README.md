@@ -4,9 +4,9 @@
 [![Build Status](https://img.shields.io/github/actions/workflow/status/swiftly-headquarters/takumi/build.yml?branch=main)](https://github.com/swiftly-headquarters/takumi/actions)
 [![Release](https://img.shields.io/github/v/release/swiftly-headquarters/takumi?include_prereleases)](https://github.com/swiftly-headquarters/takumi/releases)
 
-Generate typed API SDKs from OpenAPI 3.x and Swagger 2.0 specs. Point it at an `openapi.json` / `openapi.yaml` (a file or a URL) and get a ready-to-use client.
+Generate typed API SDKs from OpenAPI 3.x and Swagger 2.0 specs, or gRPC SDKs from `.proto` files. Point it at an `openapi.json` / `openapi.yaml` (a file or a URL) or a `.proto` file and get a ready-to-use client.
 
-Built in Go, ships as a single static binary. Generated SDKs have zero runtime dependencies.
+Built in Go, ships as a single static binary. Generated OpenAPI SDKs have zero runtime dependencies. gRPC SDKs need `google.golang.org/grpc` (Go) or a gRPC-web endpoint (TypeScript), see [gRPC SDKs](#grpc-sdks).
 
 ## Supported languages
 
@@ -42,6 +42,7 @@ go install github.com/swiftly-headquarters/takumi@latest
 | ------------------------ | ----------------------------------------------------------------------------------------- |
 | `spec`                   | Loads OpenAPI 3.x or Swagger 2.0 (JSON or YAML, file or URL), bundles multi-file specs, resolves `$ref`s, flattens paths into operations, deduces `resource.method` names. |
 | `generators/typescript`  | TypeScript generator. Type mapping in `typescript.go`, the shipped HTTP runtime in `runtime.ts`. |
+| `protospec`              | Compiles a `.proto` file (imports and `google/protobuf/*` included) and finds the messages and enums its services use. |
 | `generators/golang`      | Go generator. Type mapping and methods in `golang.go`, the shipped HTTP runtime in `runtime.go.txt`. |
 | `main.go`                | CLI entry point and the `-lang` → generator registry.                                     |
 
@@ -157,6 +158,39 @@ Optional parameters and fields are pointers. Operations take `ctx`, a params str
 
 The output has no `go.mod`; add your own or copy the files into an existing module.
 
+## gRPC SDKs
+
+Pass a `.proto` file as `-input` and takumi generates a client for every `service` in it. Imports resolve relative to the file. Only the messages and enums a service uses are generated.
+
+```bash
+./takumi -input shop.proto -output ./sdk -lang go
+./takumi -input shop.proto -output ./sdk -lang typescript
+./takumi -input shop.proto -plan   # list Service.Method
+```
+
+**Go** writes `types.go` and `client.go`. Messages are plain structs with `protobuf` struct tags, so `grpc-go` encodes them without generated descriptors; `google/protobuf/*` types map to `timestamppb` and friends. Needs `google.golang.org/grpc` and `google.golang.org/protobuf` in your module.
+
+```go
+conn, _ := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
+c := sdk.NewClient(conn)
+receipt, err := c.Shop.Place(ctx, &sdk.Order{ID: "o1"}) // unary
+stream, err := c.Shop.Watch(ctx, &sdk.WatchRequest{ID: "o1"}) // grpc.ServerStreamingClient[Receipt]
+```
+
+All four call kinds are supported. Fields in a `oneof`, and proto3 `optional` scalars, are set through wrapper structs (`Payment: &sdk.Order_Voucher{Voucher: ...}`). Groups and extensions are not supported.
+
+**TypeScript** writes `types.ts`, `client.ts`, `runtime.ts` and `index.ts`. It speaks gRPC-web over `fetch` with its own protobuf encoder, no dependencies. The server must accept gRPC-web (Envoy, or a server with gRPC-web enabled), not only native gRPC.
+
+```ts
+import { Client, GrpcError } from "./sdk/index.js";
+
+const api = new Client({ baseUrl: "https://api.example.com", headers: { authorization: "Bearer ..." } });
+const receipt = await api.shop.place({ id: "o1", items: [{ sku: "a", quantity: 2 }] });
+for await (const r of api.shop.watch({ id: "o1" })) console.log(r.status);
+```
+
+64-bit integers are `bigint`, `bytes` are `Uint8Array`, maps are `Record<string, V>`, enums are `as const` objects. Requests are deep partials; responses have every field filled with its default. gRPC-web only carries unary and server-streaming calls, so client-streaming and bidirectional methods are skipped and noted in `client.ts`. Failed calls throw `GrpcError` with the numeric `code`.
+
 ## Building from source
 
 Requires **Go 1.27+**.
@@ -191,12 +225,17 @@ takumi/
 │   ├── bundle.go                # Inlines external $refs (other files, URLs)
 │   ├── swagger.go               # Swagger 2.0 -> OpenAPI 3.0 conversion
 │   └── plan.go                  # Plan(): deduces resource.method names from paths and operationIds
+├── protospec/
+│   └── protospec.go             # .proto loading (protocompile), reachable messages and enums
 ├── generators/
 │   ├── golang/
 │   │   ├── golang.go           # Schema -> Go types, operations -> Client methods
+│   │   ├── grpc.go             # .proto -> Go structs and grpc-go client
 │   │   └── runtime.go.txt      # Embedded net/http runtime (request, APIError, styles)
 │   └── typescript/
 │       ├── typescript.go        # Schema -> TS types, operations -> Client methods
+│       ├── grpc.go              # .proto -> TS types, schemas and gRPC-web client
+│       ├── grpc_runtime.ts      # Embedded protobuf codec and gRPC-web transport
 │       └── runtime.ts           # Embedded fetch runtime (BaseClient, ApiError)
 ├── tests/
 │   ├── spec/                    # Plan(), loading, bundling and Swagger 2.0 tests

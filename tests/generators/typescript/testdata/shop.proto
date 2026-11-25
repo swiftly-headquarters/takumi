@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package shop.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Shop manages orders.
+service Shop {
+  // Place creates an order.
+  rpc Place(Order) returns (Receipt);
+  // Watch streams status changes of an order.
+  rpc Watch(WatchRequest) returns (stream Receipt);
+  // Upload sends many items and gets one receipt.
+  rpc Upload(stream Item) returns (Receipt);
+  // Chat is bidirectional.
+  rpc Chat(stream Item) returns (stream Item);
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_PAID = 1;
+  STATUS_SHIPPED = 2;
+}
+
+message Item {
+  string sku = 1;
+  uint32 quantity = 2;
+}
+
+// Order is a customer order.
+message Order {
+  enum Priority {
+    LOW = 0;
+    HIGH = 1;
+  }
+  string id = 1;
+  int64 total_cents = 2;
+  sint32 delta = 3;
+  double weight = 4;
+  float ratio = 5;
+  bool gift = 6;
+  bytes note = 7;
+  repeated Item items = 8;
+  repeated int32 codes = 9;
+  repeated string tags = 10;
+  map<string, Item> by_sku = 11;
+  map<int32, string> labels = 12;
+  Status status = 13;
+  Priority priority = 14;
+  optional string coupon = 15;
+  oneof payment {
+    string card = 16;
+    Item voucher = 17;
+  }
+  google.protobuf.Timestamp placed_at = 18;
+  fixed64 big = 19;
+  sfixed32 small = 20;
+  uint64 huge = 21;
+}
+
+message WatchRequest {
+  string id = 1;
+}
+
+message Receipt {
+  string id = 1;
+  Status status = 2;
+}
